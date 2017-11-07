@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/go-multierror"
+	"github.com/imdario/mergo"
 	"github.com/melonproject/ethereum-go-client"
 
 	metrics "github.com/armon/go-metrics"
@@ -25,28 +27,21 @@ const (
 	gracefulTimeout = 5 * time.Second
 )
 
-var (
-	DefaultHTTPAddr = &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 4647}
-)
-
 type Config struct {
-	LogOutput    io.Writer
-	HTTPAddr     *net.TCPAddr
-	EthereumAddr string
-	NodeName     string
+	LogOutput  io.Writer
+	BindAddr   string `json:"bind"`
+	BindPort   int    `json:"port"`
+	EthAddress string `json:"ethaddress"`
+	NodeName   string `json:"nodename"`
 }
 
 func DefaultConfig() *Config {
 	c := &Config{
-		LogOutput:    os.Stderr,
-		HTTPAddr:     DefaultHTTPAddr,
-		NodeName:     "parity",
-		EthereumAddr: "localhost:8545",
-	}
-
-	hostname, err := os.Hostname()
-	if err == nil {
-		c.NodeName = hostname
+		LogOutput:  os.Stderr,
+		BindAddr:   "127.0.0.1",
+		BindPort:   4546,
+		NodeName:   "parity",
+		EthAddress: "localhost:8545",
 	}
 
 	return c
@@ -56,8 +51,8 @@ type Exporter struct {
 	config    *Config
 	logger    *log.Logger
 	InmemSink *metrics.InmemSink
-
 	ethClient *ethclient.Client
+	HTTPAddr  net.Addr
 	rcpStop   chan struct{}
 	mux       *http.ServeMux
 	listener  net.Listener
@@ -71,6 +66,13 @@ func NewExporter(config *Config) (*Exporter, error) {
 
 	e.logger = log.New(config.LogOutput, "", log.LstdFlags)
 
+	bindIP := net.ParseIP(config.BindAddr)
+	if bindIP == nil {
+		return nil, fmt.Errorf("Bind address '%s' is not a valid ip", bindIP)
+	}
+
+	e.HTTPAddr = &net.TCPAddr{IP: bindIP, Port: config.BindPort}
+
 	var err error
 	e.InmemSink, err = e.setupTelemetry()
 	if err != nil {
@@ -81,41 +83,31 @@ func NewExporter(config *Config) (*Exporter, error) {
 }
 
 func (e *Exporter) setupTelemetry() (*metrics.InmemSink, error) {
-
 	// Prepare metrics
-	sink, _ := prometheus.NewPrometheusSink()
-	m, err := metrics.NewGlobal(metrics.DefaultConfig("apiserver"), sink)
-	m.EnableHostname = false
+
+	memSink := metrics.NewInmemSink(10*time.Second, time.Minute)
+	metrics.DefaultInmemSignal(memSink)
+
+	metricsConf := metrics.DefaultConfig("parity")
+
+	var sinks metrics.FanoutSink
+
+	prom, err := prometheus.NewPrometheusSink()
 	if err != nil {
-		return nil, nil
+		panic(err)
 	}
 
-	/*
-		inm := metrics.NewInmemSink(10*time.Second, time.Minute)
-		metrics.DefaultInmemSignal(inm)
+	sinks = append(sinks, prom)
 
-		metricsConf := metrics.DefaultConfig("parity")
-		metricsConf.EnableHostname = true
-		metricsConf.HostName = e.config.NodeName
+	if len(sinks) > 0 {
+		sinks = append(sinks, memSink)
+		metrics.NewGlobal(metricsConf, sinks)
+	} else {
+		metricsConf.EnableHostname = false
+		metrics.NewGlobal(metricsConf, memSink)
+	}
 
-		var fanout metrics.FanoutSink
-
-		promSink, err := prometheus.NewPrometheusSink()
-		if err != nil {
-			return inm, nil
-		}
-		fanout = append(fanout, promSink)
-
-		if len(fanout) > 0 {
-			fanout = append(fanout, inm)
-			metrics.NewGlobal(metricsConf, fanout)
-		} else {
-			metrics.NewGlobal(metricsConf, inm)
-		}
-
-		return inm, nil
-	*/
-	return nil, nil
+	return memSink, nil
 }
 
 func (e *Exporter) Start() error {
@@ -133,9 +125,9 @@ func (e *Exporter) Start() error {
 
 func (e *Exporter) startHttp() error {
 
-	l, err := net.Listen("tcp", e.config.HTTPAddr.String())
+	l, err := net.Listen("tcp", e.HTTPAddr.String())
 	if err != nil {
-		return fmt.Errorf("failed to start listner on %s: %v", e.config.HTTPAddr.String(), err)
+		return fmt.Errorf("failed to start listner on %s: %v", e.HTTPAddr.String(), err)
 	}
 
 	e.listener = l
@@ -145,7 +137,7 @@ func (e *Exporter) startHttp() error {
 
 	go http.Serve(l, e.mux)
 
-	e.logger.Printf("Http api running on %s", e.config.HTTPAddr.String())
+	e.logger.Printf("Http api running on %s", e.HTTPAddr.String())
 
 	return nil
 }
@@ -179,7 +171,8 @@ func (e *Exporter) wrap(handler func(resp http.ResponseWriter, req *http.Request
 }
 
 func (e *Exporter) startRPC() {
-	e.ethClient = ethclient.NewClient(e.config.EthereumAddr)
+	e.ethClient = ethclient.NewClient(e.config.EthAddress)
+	e.logger.Printf("Ethereum client address: %s", e.config.EthAddress)
 
 	for {
 		select {
@@ -260,15 +253,75 @@ func (e *Exporter) Shutdown() error {
 	return nil
 }
 
-func readConfig(args []string) (*Config, error) {
-	return nil, nil
+func main() {
+	if err := run(os.Args); err != nil {
+		fmt.Printf("[ERR]: %v", err)
+		os.Exit(1)
+	}
 }
 
-func main() {
+func readConfigFile(path string) (*Config, error) {
+	data, err := ioutil.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var config Config
+	err = json.Unmarshal(data, &config)
+	if err != nil {
+		return nil, err
+	}
+
+	return &config, nil
+}
+
+func readConfig(args []string) (*Config, error) {
+
+	var fileConfigPath string
+
+	fileConfig := &Config{}
+	cliConfig := &Config{}
+
+	flag.StringVar(&fileConfigPath, "config", "", "")
+	flag.StringVar(&cliConfig.EthAddress, "ethaddress", "", "")
+	flag.StringVar(&cliConfig.NodeName, "nodename", "", "")
+	flag.StringVar(&cliConfig.BindAddr, "bind", "", "")
+	flag.IntVar(&cliConfig.BindPort, "port", 0, "")
+
 	flag.Parse()
 
+	if fileConfigPath != "" {
+		var err error
+
+		fileConfig, err = readConfigFile(fileConfigPath)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// merge everything
+
 	config := DefaultConfig()
-	logger := log.New(config.LogOutput, "", log.LstdFlags)
+
+	err := mergo.MergeWithOverwrite(config, *fileConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	err = mergo.MergeWithOverwrite(config, *cliConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	return config, nil
+}
+
+func run(args []string) error {
+
+	config, err := readConfig(args)
+	if err != nil {
+		return err
+	}
 
 	// Handle interupts.
 	c := make(chan os.Signal, 1)
@@ -276,17 +329,17 @@ func main() {
 
 	exporter, err := NewExporter(config)
 	if err != nil {
-		logger.Printf("[ERR]: Failed to create the exporter: %v", err)
-		os.Exit(1)
+		return fmt.Errorf("[ERR]: Failed to create the exporter: %v", err)
 	}
 
 	if err := exporter.Start(); err != nil {
-		logger.Printf("[ERR]: Failed to start the exporter: %v", err)
-		os.Exit(1)
+		return fmt.Errorf("[ERR]: Failed to start the exporter: %v", err)
 	}
 
 	for range c {
 		exporter.Shutdown()
-		return
+		break
 	}
+
+	return nil
 }
