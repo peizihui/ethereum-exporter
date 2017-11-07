@@ -13,13 +13,11 @@ import (
 	"time"
 
 	"github.com/hashicorp/go-multierror"
-
-	"github.com/melonproject/parity-go-client"
+	"github.com/melonproject/ethereum-go-client"
 
 	metrics "github.com/armon/go-metrics"
 	"github.com/armon/go-metrics/prometheus"
 
-	promClient "github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -32,18 +30,18 @@ var (
 )
 
 type Config struct {
-	LogOutput  io.Writer
-	HTTPAddr   *net.TCPAddr
-	ParityAddr string
-	NodeName   string
+	LogOutput    io.Writer
+	HTTPAddr     *net.TCPAddr
+	EthereumAddr string
+	NodeName     string
 }
 
 func DefaultConfig() *Config {
 	c := &Config{
-		LogOutput:  os.Stderr,
-		HTTPAddr:   DefaultHTTPAddr,
-		NodeName:   "parity",
-		ParityAddr: "localhost:8545",
+		LogOutput:    os.Stderr,
+		HTTPAddr:     DefaultHTTPAddr,
+		NodeName:     "parity",
+		EthereumAddr: "localhost:8545",
 	}
 
 	hostname, err := os.Hostname()
@@ -59,10 +57,10 @@ type Exporter struct {
 	logger    *log.Logger
 	InmemSink *metrics.InmemSink
 
-	parityClient *parityclient.Client
-	rcpStop      chan struct{}
-	mux          *http.ServeMux
-	listener     net.Listener
+	ethClient *ethclient.Client
+	rcpStop   chan struct{}
+	mux       *http.ServeMux
+	listener  net.Listener
 }
 
 func NewExporter(config *Config) (*Exporter, error) {
@@ -84,20 +82,40 @@ func NewExporter(config *Config) (*Exporter, error) {
 
 func (e *Exporter) setupTelemetry() (*metrics.InmemSink, error) {
 
-	inm := metrics.NewInmemSink(10*time.Second, time.Minute)
-	metrics.DefaultInmemSignal(inm)
-
-	metricsConf := metrics.DefaultConfig("parity")
-	metricsConf.EnableHostname = true
-	metricsConf.HostName = e.config.NodeName
-
-	promSink, err := prometheus.NewPrometheusSink()
+	// Prepare metrics
+	sink, _ := prometheus.NewPrometheusSink()
+	m, err := metrics.NewGlobal(metrics.DefaultConfig("apiserver"), sink)
+	m.EnableHostname = false
 	if err != nil {
-		return inm, nil
+		return nil, nil
 	}
 
-	metrics.NewGlobal(metricsConf, promSink)
-	return inm, nil
+	/*
+		inm := metrics.NewInmemSink(10*time.Second, time.Minute)
+		metrics.DefaultInmemSignal(inm)
+
+		metricsConf := metrics.DefaultConfig("parity")
+		metricsConf.EnableHostname = true
+		metricsConf.HostName = e.config.NodeName
+
+		var fanout metrics.FanoutSink
+
+		promSink, err := prometheus.NewPrometheusSink()
+		if err != nil {
+			return inm, nil
+		}
+		fanout = append(fanout, promSink)
+
+		if len(fanout) > 0 {
+			fanout = append(fanout, inm)
+			metrics.NewGlobal(metricsConf, fanout)
+		} else {
+			metrics.NewGlobal(metricsConf, inm)
+		}
+
+		return inm, nil
+	*/
+	return nil, nil
 }
 
 func (e *Exporter) Start() error {
@@ -161,7 +179,7 @@ func (e *Exporter) wrap(handler func(resp http.ResponseWriter, req *http.Request
 }
 
 func (e *Exporter) startRPC() {
-	e.parityClient = parityclient.NewClient(e.config.ParityAddr)
+	e.ethClient = ethclient.NewClient(e.config.EthereumAddr)
 
 	for {
 		select {
@@ -182,11 +200,38 @@ func (e *Exporter) rpcCalls() error {
 
 	// Peers
 
-	peers, err := e.parityClient.Peers()
+	peers, err := e.ethClient.NetPeerCount()
 	if err != nil {
 		errors = multierror.Append(errors, err)
 	} else {
-		e.InmemSink.SetGauge([]string{"peers"}, float32(peers.Connected))
+		metrics.SetGauge([]string{"peers"}, float32(peers))
+	}
+
+	// BlockNumber
+
+	blockNumber, err := e.ethClient.EthBlockNumber()
+	if err != nil {
+		errors = multierror.Append(errors, err)
+	} else {
+		metrics.SetGauge([]string{"blockNumber"}, float32(blockNumber))
+	}
+
+	// GassPrice
+
+	gassPrice, err := e.ethClient.EthGassPrice()
+	if err != nil {
+		errors = multierror.Append(errors, err)
+	} else {
+		metrics.SetGauge([]string{"gassPrice"}, float32(gassPrice))
+	}
+
+	// HashRate
+
+	hashRate, err := e.ethClient.EthHashRate()
+	if err != nil {
+		errors = multierror.Append(errors, err)
+	} else {
+		metrics.SetGauge([]string{"hashRate"}, float32(hashRate))
 	}
 
 	return errors
@@ -198,13 +243,7 @@ func (e *Exporter) MetricsRequest(resp http.ResponseWriter, req *http.Request) (
 	}
 
 	if format := req.URL.Query().Get("format"); format == "prometheus" {
-		handlerOptions := promhttp.HandlerOpts{
-			ErrorLog:           e.logger,
-			ErrorHandling:      promhttp.ContinueOnError,
-			DisableCompression: true,
-		}
-
-		handler := promhttp.HandlerFor(promClient.DefaultGatherer, handlerOptions)
+		handler := promhttp.Handler()
 		handler.ServeHTTP(resp, req)
 		return nil, nil
 	}
