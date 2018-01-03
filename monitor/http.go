@@ -47,6 +47,7 @@ func (h *HttpServer) Start(ctx context.Context) error {
 
 	h.mux = http.NewServeMux()
 	h.mux.Handle("/metrics", h.wrap(h.MetricsRequest))
+	h.mux.Handle("/synced", h.wrap(h.SyncedRequest))
 
 	go http.Serve(l, h.mux)
 
@@ -81,6 +82,14 @@ func (h *HttpServer) wrap(handler func(resp http.ResponseWriter, req *http.Reque
 		resp.Header().Set("Content-Type", "application/json")
 		resp.Write(buf)
 	}
+}
+
+func (h *HttpServer) SyncedRequest(resp http.ResponseWriter, req *http.Request) (interface{}, error) {
+	if req.Method != "GET" {
+		return nil, fmt.Errorf("Incorrect method. Found %s, only GET available", req.Method)
+	}
+
+	return h.monitor.synced, nil
 }
 
 func (h *HttpServer) MetricsRequest(resp http.ResponseWriter, req *http.Request) (interface{}, error) {

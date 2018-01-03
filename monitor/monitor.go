@@ -4,54 +4,88 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math/big"
 	"net"
 	"time"
 
 	metrics "github.com/armon/go-metrics"
 	"github.com/armon/go-metrics/prometheus"
-	ethclient "github.com/melonproject/ethereum-go-client/client"
-)
-
-const (
-	gracefulTimeout = 5 * time.Second
+	"github.com/hashicorp/go-multierror"
 )
 
 type Monitor struct {
 	config    *Config
 	logger    *log.Logger
 	InmemSink *metrics.InmemSink
-	ethClient *ethclient.Client
+
+	// Etherscan
+	etherscan *Etherscan
+
+	// Ethereum client
+	ethClient *EthClient
 
 	// Http server
 	http *HttpServer
 
-	rcpStop chan struct{}
+	// Last block number
+	lastBlock *Block
+	synced    bool
 }
 
 func NewMonitor(config *Config) (*Monitor, error) {
-	e := &Monitor{
-		config:  config,
-		rcpStop: make(chan struct{}, 1),
+	m := &Monitor{
+		config: config,
+		synced: false,
 	}
 
-	e.logger = log.New(config.LogOutput, "", log.LstdFlags)
+	m.logger = log.New(config.LogOutput, "", log.LstdFlags)
 
 	bindIP := net.ParseIP(config.BindAddr)
 	if bindIP == nil {
 		return nil, fmt.Errorf("Bind address '%s' is not a valid ip", bindIP)
 	}
 
+	if err := m.setupApis(); err != nil {
+		panic(err)
+	}
+
 	addr := &net.TCPAddr{IP: bindIP, Port: config.BindPort}
 
-	e.http = NewHttpServer(e.logger, e, addr)
+	m.http = NewHttpServer(m.logger, m, addr)
 
 	var err error
-	e.InmemSink, err = e.setupTelemetry()
+
+	m.InmemSink, err = m.setupTelemetry()
 	if err != nil {
 		return nil, err
 	}
 
-	return e, nil
+	return m, nil
+}
+
+func (m *Monitor) setupApis() error {
+
+	m.ethClient = NewEthClient(m.config.EthAddress)
+
+	chain, err := m.ethClient.Chain()
+	if err != nil {
+		return err
+	}
+
+	var url string
+	switch chain {
+	case "kovan":
+		url = "https://kovan.etherscan.io/api?module=proxy&action=eth_blockNumber"
+	case "foundation":
+		url = "https://api.etherscan.io/api?module=proxy&action=eth_blockNumber"
+	default:
+		return fmt.Errorf("Chain %s not found. 'kovan' and 'foundation' are the only valid options", chain)
+	}
+
+	m.logger.Printf("Using chain %s", chain)
+	m.etherscan = NewEtherscan(url)
+
+	return nil
 }
 
 func (e *Monitor) setupTelemetry() (*metrics.InmemSink, error) {
@@ -60,13 +94,13 @@ func (e *Monitor) setupTelemetry() (*metrics.InmemSink, error) {
 	memSink := metrics.NewInmemSink(10*time.Second, time.Minute)
 	metrics.DefaultInmemSignal(memSink)
 
-	metricsConf := metrics.DefaultConfig("parity")
+	metricsConf := metrics.DefaultConfig(e.config.NodeName)
 
 	var sinks metrics.FanoutSink
 
 	prom, err := prometheus.NewPrometheusSink()
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
 
 	sinks = append(sinks, prom)
@@ -82,46 +116,82 @@ func (e *Monitor) setupTelemetry() (*metrics.InmemSink, error) {
 	return memSink, nil
 }
 
-func (e *Monitor) Start(ctx context.Context) error {
-	e.logger.Println("Staring server")
+func Sub(x, y *big.Int) *big.Int {
+	return big.NewInt(0).Sub(x, y)
+}
 
-	if err := e.http.Start(ctx); err != nil {
+func (m *Monitor) Start(ctx context.Context) error {
+	m.logger.Println("Staring monitor")
+
+	if err := m.http.Start(ctx); err != nil {
 		return err
 	}
 
-	go e.startRPC()
-
+	go m.start(ctx)
 	return nil
 }
 
-func (e *Monitor) startRPC() {
-	e.ethClient = ethclient.NewClient(e.config.EthAddress)
-	e.logger.Printf("Ethereum client address: %s", e.config.EthAddress)
-
+func (m *Monitor) start(ctx context.Context) {
 	for {
 		select {
-		case <-time.After(5 * time.Second):
-			err := e.rpcCalls()
-			if err != nil {
-				e.logger.Printf("[ERR]: Failed to make rpc calls to parity: %v", err)
+		case <-time.After(m.config.RPCInterval):
+			// RPC calls
+			if err := m.gatherMetrics(); err != nil {
+				panic(err)
 			}
-
-		case <-e.rcpStop:
-			return
+		case <-ctx.Done():
+			m.logger.Println("Monitor shutting down")
 		}
 	}
 }
 
-func (e *Monitor) rpcCalls() error {
+func (m *Monitor) gatherMetrics() error {
 	var errors error
 
+	// Peers
+
+	peers, err := m.ethClient.PeerCount()
+	if err != nil {
+		errors = multierror.Append(errors, err)
+	} else {
+		metrics.SetGauge([]string{"peers"}, float32(peers))
+	}
+
+	// BlockNumber
+
+	blockNumber, err := m.ethClient.BlockNumber()
+	if err != nil {
+		errors = multierror.Append(errors, err)
+	} else {
+		metrics.SetGauge([]string{"blockNumber"}, float32(blockNumber.Int64()))
+	}
+
+	// Block
+
+	block, err := m.ethClient.BlockByNumber(blockNumber)
+	if err != nil {
+		errors = multierror.Append(errors, err)
+	} else {
+		if m.lastBlock != nil {
+			blockTime := block.Timestamp.Sub(*m.lastBlock.Timestamp)
+			metrics.SetGauge([]string{"blocktime"}, float32(blockTime.Seconds()))
+		}
+		m.lastBlock = block
+	}
+
+	// Etherscan
+
+	realBlockNumber, err := m.etherscan.BlockNumber()
+	if err != nil {
+		errors = multierror.Append(errors, err)
+	} else {
+		blocksbehind := Sub(realBlockNumber, blockNumber)
+		metrics.SetGauge([]string{"blocksbehind"}, float32(blocksbehind.Int64()))
+
+		if blocksbehind.Int64() == 0 {
+			m.synced = true
+		}
+	}
+
 	return errors
-}
-
-func (e *Monitor) Shutdown() error {
-	e.logger.Println("Shutting down")
-
-	e.rcpStop <- struct{}{}
-
-	return nil
 }

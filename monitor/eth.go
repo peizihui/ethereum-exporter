@@ -26,6 +26,10 @@ type Etherscan struct {
 	addr string
 }
 
+func NewEtherscan(addr string) *Etherscan {
+	return &Etherscan{addr}
+}
+
 func (e *Etherscan) BlockNumber() (*big.Int, error) {
 	resp, err := http.Get(e.addr)
 	if err != nil {
