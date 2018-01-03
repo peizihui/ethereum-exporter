@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -77,6 +78,8 @@ func readConfig(args []string) (*monitor.Config, error) {
 
 func run(args []string) error {
 
+	ctx := context.Background
+
 	config, err := readConfig(args)
 	if err != nil {
 		return err
@@ -91,7 +94,7 @@ func run(args []string) error {
 		return fmt.Errorf("[ERR]: Failed to create the monitor: %v", err)
 	}
 
-	if err := monitor.Start(); err != nil {
+	if err := monitor.Start(ctx); err != nil {
 		return fmt.Errorf("[ERR]: Failed to start the monitor: %v", err)
 	}
 
