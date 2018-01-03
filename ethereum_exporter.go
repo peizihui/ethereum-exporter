@@ -78,7 +78,7 @@ func readConfig(args []string) (*monitor.Config, error) {
 
 func run(args []string) error {
 
-	ctx := context.Background
+	ctx := context.Background()
 
 	config, err := readConfig(args)
 	if err != nil {

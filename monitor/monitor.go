@@ -121,7 +121,6 @@ func (e *Monitor) rpcCalls() error {
 func (e *Monitor) Shutdown() error {
 	e.logger.Println("Shutting down")
 
-	e.listener.Close()
 	e.rcpStop <- struct{}{}
 
 	return nil
