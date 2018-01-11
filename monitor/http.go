@@ -89,7 +89,11 @@ func (h *HttpServer) SyncedRequest(resp http.ResponseWriter, req *http.Request) 
 		return nil, fmt.Errorf("Incorrect method. Found %s, only GET available", req.Method)
 	}
 
-	return h.monitor.synced, nil
+	if h.monitor.synced {
+		return true, nil
+	}
+
+	return nil, fmt.Errorf("Parity is not synced")
 }
 
 func (h *HttpServer) MetricsRequest(resp http.ResponseWriter, req *http.Request) (interface{}, error) {
@@ -97,11 +101,11 @@ func (h *HttpServer) MetricsRequest(resp http.ResponseWriter, req *http.Request)
 		return nil, fmt.Errorf("Incorrect method. Found %s, only GET available", req.Method)
 	}
 
-	if format := req.URL.Query().Get("format"); format == "prometheus" {
-		handler := promhttp.Handler()
-		handler.ServeHTTP(resp, req)
-		return nil, nil
-	}
+	//if format := req.URL.Query().Get("format"); format == "prometheus" {
+	handler := promhttp.Handler()
+	handler.ServeHTTP(resp, req)
+	return nil, nil
+	//}
 
 	return h.monitor.InmemSink.DisplayMetrics(resp, req)
 }

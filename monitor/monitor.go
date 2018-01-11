@@ -6,10 +6,12 @@ import (
 	"log"
 	"math/big"
 	"net"
+	"strings"
 	"time"
 
 	metrics "github.com/armon/go-metrics"
 	"github.com/armon/go-metrics/prometheus"
+	consulapi "github.com/hashicorp/consul/api"
 	"github.com/hashicorp/go-multierror"
 )
 
@@ -17,6 +19,9 @@ type Monitor struct {
 	config    *Config
 	logger    *log.Logger
 	InmemSink *metrics.InmemSink
+
+	// ethereum chain
+	chain string
 
 	// Etherscan
 	etherscan *Etherscan
@@ -29,13 +34,16 @@ type Monitor struct {
 
 	// Last block number
 	lastBlock *Block
+
+	connected bool
 	synced    bool
 }
 
 func NewMonitor(config *Config) (*Monitor, error) {
 	m := &Monitor{
-		config: config,
-		synced: false,
+		config:    config,
+		connected: false,
+		synced:    false,
 	}
 
 	m.logger = log.New(config.LogOutput, "", log.LstdFlags)
@@ -45,13 +53,11 @@ func NewMonitor(config *Config) (*Monitor, error) {
 		return nil, fmt.Errorf("Bind address '%s' is not a valid ip", bindIP)
 	}
 
-	if err := m.setupApis(); err != nil {
-		panic(err)
-	}
-
 	addr := &net.TCPAddr{IP: bindIP, Port: config.BindPort}
 
 	m.http = NewHttpServer(m.logger, m, addr)
+
+	go m.setupConsul()
 
 	var err error
 
@@ -65,13 +71,15 @@ func NewMonitor(config *Config) (*Monitor, error) {
 
 func (m *Monitor) setupApis() error {
 
-	m.ethClient = NewEthClient(m.config.EthAddress)
+	// api
+	m.ethClient = NewEthClient(m.config.Endpoint)
 
 	chain, err := m.ethClient.Chain()
 	if err != nil {
 		return err
 	}
 
+	// etherscan
 	var url string
 	switch chain {
 	case "kovan":
@@ -88,13 +96,13 @@ func (m *Monitor) setupApis() error {
 	return nil
 }
 
-func (e *Monitor) setupTelemetry() (*metrics.InmemSink, error) {
+func (m *Monitor) setupTelemetry() (*metrics.InmemSink, error) {
 	// Prepare metrics
 
 	memSink := metrics.NewInmemSink(10*time.Second, time.Minute)
 	metrics.DefaultInmemSignal(memSink)
 
-	metricsConf := metrics.DefaultConfig(e.config.NodeName)
+	metricsConf := metrics.DefaultConfig(m.config.NodeName)
 
 	var sinks metrics.FanoutSink
 
@@ -116,6 +124,55 @@ func (e *Monitor) setupTelemetry() (*metrics.InmemSink, error) {
 	return memSink, nil
 }
 
+func (m *Monitor) setupConsul() {
+	retries := 5
+	sleepDuration := 1 * time.Minute
+
+	for i := 0; i < retries; i++ {
+		err := m.setupConsulImpl()
+		if err == nil {
+			m.logger.Printf("Service registred in consul")
+			return
+		}
+
+		m.logger.Printf("Failed to connect to consul: %v", err)
+		time.Sleep(sleepDuration)
+	}
+
+	m.logger.Printf("Stop trying to register on consul")
+}
+
+func (m *Monitor) setupConsulImpl() error {
+	serviceID := fmt.Sprintf("parity-%s-%s", m.chain, m.config.ConsulServiceName)
+
+	// address
+	address := fmt.Sprintf("http://%s:%d", m.config.BindAddr, m.config.BindPort)
+
+	service := &consulapi.AgentServiceRegistration{
+		ID:      serviceID,
+		Name:    m.config.ConsulServiceName,
+		Port:    m.config.BindPort,
+		Address: address,
+		Tags:    []string{"pool", "parity", m.chain},
+		Check: &consulapi.AgentServiceCheck{
+			HTTP:     fmt.Sprintf("%s/synced", address),
+			Interval: "1s",
+			Timeout:  "5s",
+		},
+	}
+
+	client, err := consulapi.NewClient(consulapi.DefaultConfig())
+	if err != nil {
+		return err
+	}
+
+	if err := client.Agent().ServiceRegister(service); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func Sub(x, y *big.Int) *big.Int {
 	return big.NewInt(0).Sub(x, y)
 }
@@ -132,12 +189,33 @@ func (m *Monitor) Start(ctx context.Context) error {
 }
 
 func (m *Monitor) start(ctx context.Context) {
+
+	// gather metrics
 	for {
 		select {
 		case <-time.After(m.config.RPCInterval):
-			// RPC calls
-			if err := m.gatherMetrics(); err != nil {
-				panic(err)
+
+			if m.connected {
+
+				// RPC calls
+				if err := m.gatherMetrics(); err != nil {
+					m.logger.Printf("Export errors: %v", err)
+
+					if strings.Contains(err.Error(), "connection refused") { // TODO. Add fallback strategy
+						m.logger.Printf("Node may be down")
+						m.connected = false
+					}
+				}
+
+			} else {
+
+				// setup APIS
+				if err := m.setupApis(); err != nil {
+					m.logger.Printf("Failed to connect to node: %v", err)
+				} else {
+					m.logger.Printf("Chain connected. Gathering metrics...")
+					m.connected = true
+				}
 			}
 		case <-ctx.Done():
 			m.logger.Println("Monitor shutting down")

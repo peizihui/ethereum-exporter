@@ -7,6 +7,5 @@ build:
 
 docker:
 	echo ">> building docker image..."
-	docker build -t "$(DOCKER_IMAGE_NAME)" .
 
 .PHONY: build docker

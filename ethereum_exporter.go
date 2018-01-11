@@ -43,7 +43,7 @@ func readConfig(args []string) (*monitor.Config, error) {
 	cliConfig := &monitor.Config{}
 
 	flag.StringVar(&fileConfigPath, "config", "", "")
-	flag.StringVar(&cliConfig.EthAddress, "ethaddress", "", "")
+	flag.StringVar(&cliConfig.Endpoint, "endpoint", "", "")
 	flag.StringVar(&cliConfig.NodeName, "nodename", "", "")
 	flag.StringVar(&cliConfig.BindAddr, "bind", "", "")
 	flag.IntVar(&cliConfig.BindPort, "port", 0, "")
@@ -82,7 +82,7 @@ func run(args []string) error {
 
 	config, err := readConfig(args)
 	if err != nil {
-		return err
+		return fmt.Errorf("Failed to read config: %v", err)
 	}
 
 	// Handle interupts.
@@ -91,15 +91,15 @@ func run(args []string) error {
 
 	monitor, err := monitor.NewMonitor(config)
 	if err != nil {
-		return fmt.Errorf("[ERR]: Failed to create the monitor: %v", err)
+		return fmt.Errorf("Failed to create the monitor: %v", err)
 	}
 
 	if err := monitor.Start(ctx); err != nil {
-		return fmt.Errorf("[ERR]: Failed to start the monitor: %v", err)
+		return fmt.Errorf("Failed to start the monitor: %v", err)
 	}
 
 	for range c {
-		monitor.Shutdown()
+		ctx.Done()
 		break
 	}
 
