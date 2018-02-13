@@ -1,0 +1,11 @@
+{
+    "endpoint": "http://localhost:8545",
+    "port": 4000,
+    "consul": {
+        "tags": [
+            "parity",
+            "pool"
+        ],
+        "service_name": "pool"
+    }
+}
