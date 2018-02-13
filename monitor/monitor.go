@@ -164,6 +164,7 @@ func (m *Monitor) setupConsulImpl() error {
 		ID:   serviceID,
 		Name: m.config.ConsulConfig.ServiceName,
 		Tags: m.config.ConsulConfig.Tags,
+		Port: 8545,
 		Check: &consulapi.AgentServiceCheck{
 			HTTP:     fmt.Sprintf("http://%s/synced", healthAddr),
 			Interval: "1s",
