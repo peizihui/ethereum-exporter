@@ -158,16 +158,14 @@ func (m *Monitor) setupConsulImpl() error {
 	serviceID := fmt.Sprintf(m.config.NodeName)
 
 	// address
-	address := fmt.Sprintf("http://%s:%d", m.config.BindAddr, m.config.BindPort)
+	healthAddr := fmt.Sprintf("%s:%d", m.config.BindAddr, m.config.BindPort)
 
 	service := &consulapi.AgentServiceRegistration{
-		ID:      serviceID,
-		Name:    m.config.ConsulConfig.ServiceName,
-		Port:    m.config.BindPort,
-		Address: address,
-		Tags:    m.config.ConsulConfig.Tags,
+		ID:   serviceID,
+		Name: m.config.ConsulConfig.ServiceName,
+		Tags: m.config.ConsulConfig.Tags,
 		Check: &consulapi.AgentServiceCheck{
-			HTTP:     fmt.Sprintf("%s/synced", address),
+			HTTP:     fmt.Sprintf("http://%s/synced", healthAddr),
 			Interval: "1s",
 			Timeout:  "5s",
 		},
