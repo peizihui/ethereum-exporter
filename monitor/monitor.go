@@ -37,6 +37,8 @@ type Monitor struct {
 
 	connected bool
 	synced    bool
+
+	baseLabels []metrics.Label
 }
 
 func NewMonitor(config *Config) (*Monitor, error) {
@@ -67,6 +69,15 @@ func NewMonitor(config *Config) (*Monitor, error) {
 	}
 
 	return m, nil
+}
+
+func (m *Monitor) setBaseLabels() {
+	m.baseLabels = []metrics.Label{}
+
+	m.baseLabels = append(m.baseLabels, metrics.Label{
+		Name:  "node",
+		Value: m.config.NodeName,
+	})
 }
 
 func (m *Monitor) setupApis() error {
@@ -102,7 +113,8 @@ func (m *Monitor) setupTelemetry() (*metrics.InmemSink, error) {
 	memSink := metrics.NewInmemSink(10*time.Second, time.Minute)
 	metrics.DefaultInmemSignal(memSink)
 
-	metricsConf := metrics.DefaultConfig(m.config.NodeName)
+	metricsConf := metrics.DefaultConfig("parity-pool")
+	metricsConf.EnableHostnameLabel = true
 
 	var sinks metrics.FanoutSink
 
@@ -143,7 +155,7 @@ func (m *Monitor) setupConsul() {
 }
 
 func (m *Monitor) setupConsulImpl() error {
-	serviceID := fmt.Sprintf("parity-%s-%s", m.chain, m.config.ConsulServiceName)
+	serviceID := fmt.Sprintf(m.config.NodeName)
 
 	// address
 	address := fmt.Sprintf("http://%s:%d", m.config.BindAddr, m.config.BindPort)
@@ -173,6 +185,10 @@ func (m *Monitor) setupConsulImpl() error {
 	return nil
 }
 
+func Abs(x *big.Int) *big.Int {
+	return big.NewInt(0).Abs(x)
+}
+
 func Sub(x, y *big.Int) *big.Int {
 	return big.NewInt(0).Sub(x, y)
 }
@@ -196,6 +212,7 @@ func (m *Monitor) start(ctx context.Context) {
 		case <-time.After(m.config.RPCInterval):
 
 			if m.connected {
+				previousState := m.synced
 
 				// RPC calls
 				if err := m.gatherMetrics(); err != nil {
@@ -204,6 +221,10 @@ func (m *Monitor) start(ctx context.Context) {
 					if strings.Contains(err.Error(), "connection refused") { // TODO. Add fallback strategy
 						m.logger.Printf("Node may be down")
 						m.connected = false
+					}
+
+					if previousState != m.synced {
+						fmt.Printf("State changed. Is Synced?: %v\n", m.synced)
 					}
 				}
 
@@ -232,7 +253,7 @@ func (m *Monitor) gatherMetrics() error {
 	if err != nil {
 		errors = multierror.Append(errors, err)
 	} else {
-		metrics.SetGauge([]string{"peers"}, float32(peers))
+		metrics.SetGaugeWithLabels([]string{"peers"}, float32(peers), m.baseLabels)
 	}
 
 	// BlockNumber
@@ -241,7 +262,7 @@ func (m *Monitor) gatherMetrics() error {
 	if err != nil {
 		errors = multierror.Append(errors, err)
 	} else {
-		metrics.SetGauge([]string{"blockNumber"}, float32(blockNumber.Int64()))
+		metrics.SetGaugeWithLabels([]string{"blockNumber"}, float32(blockNumber.Int64()), m.baseLabels)
 	}
 
 	// Block
@@ -252,22 +273,28 @@ func (m *Monitor) gatherMetrics() error {
 	} else {
 		if m.lastBlock != nil {
 			blockTime := block.Timestamp.Sub(*m.lastBlock.Timestamp)
-			metrics.SetGauge([]string{"blocktime"}, float32(blockTime.Seconds()))
+			metrics.SetGaugeWithLabels([]string{"blocktime"}, float32(blockTime.Seconds()), m.baseLabels)
 		}
 		m.lastBlock = block
 	}
 
 	// Etherscan
 
-	realBlockNumber, err := m.etherscan.BlockNumber()
-	if err != nil {
-		errors = multierror.Append(errors, err)
-	} else {
-		blocksbehind := Sub(realBlockNumber, blockNumber)
-		metrics.SetGauge([]string{"blocksbehind"}, float32(blocksbehind.Int64()))
+	if blockNumber != nil {
+		realBlockNumber, err := m.etherscan.BlockNumber()
+		if err != nil {
+			errors = multierror.Append(errors, err)
+		} else {
+			blocksbehind := Sub(realBlockNumber, blockNumber)
+			metrics.SetGaugeWithLabels([]string{"blocksbehind"}, float32(blocksbehind.Int64()), m.baseLabels)
 
-		if blocksbehind.Int64() == 0 {
-			m.synced = true
+			blocksDiff := int(Abs(blocksbehind).Int64())
+			if blocksDiff <= m.config.SyncThreshold {
+				m.synced = true
+			} else {
+				m.synced = false
+			}
+
 		}
 	}
 

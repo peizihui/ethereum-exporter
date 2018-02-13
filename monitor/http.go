@@ -89,6 +89,10 @@ func (h *HttpServer) SyncedRequest(resp http.ResponseWriter, req *http.Request) 
 		return nil, fmt.Errorf("Incorrect method. Found %s, only GET available", req.Method)
 	}
 
+	if !h.monitor.connected {
+		return nil, fmt.Errorf("Parity host unreachable")
+	}
+
 	if h.monitor.synced {
 		return true, nil
 	}

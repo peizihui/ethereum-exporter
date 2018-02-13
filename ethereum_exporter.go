@@ -47,6 +47,7 @@ func readConfig(args []string) (*monitor.Config, error) {
 	flag.StringVar(&cliConfig.NodeName, "nodename", "", "")
 	flag.StringVar(&cliConfig.BindAddr, "bind", "", "")
 	flag.IntVar(&cliConfig.BindPort, "port", 0, "")
+	flag.IntVar(&cliConfig.SyncThreshold, "threshold", 5, "")
 
 	flag.Parse()
 
