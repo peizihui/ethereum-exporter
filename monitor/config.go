@@ -17,6 +17,9 @@ type Config struct {
 	// Consul config
 	ConsulAddress     string
 	ConsulServiceName string
+
+	// Sync threashold
+	SyncThreshold int
 }
 
 func DefaultConfig() *Config {
@@ -29,6 +32,7 @@ func DefaultConfig() *Config {
 		RPCInterval:       time.Duration(5) * time.Second,
 		ConsulAddress:     "http://127.0.0.1:8500",
 		ConsulServiceName: "pool",
+		SyncThreshold:     5,
 	}
 
 	if hostname, err := os.Hostname(); err == nil {
