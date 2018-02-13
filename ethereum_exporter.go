@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/signal"
 
-	"github.com/imdario/mergo"
 	"github.com/melonproject/ethereum-exporter/monitor"
 )
 
@@ -39,8 +38,15 @@ func readConfig(args []string) (*monitor.Config, error) {
 
 	var fileConfigPath string
 
-	fileConfig := &monitor.Config{}
-	cliConfig := &monitor.Config{}
+	config := monitor.DefaultConfig()
+
+	fileConfig := &monitor.Config{
+		ConsulConfig: &monitor.ConsulConfig{},
+	}
+
+	cliConfig := &monitor.Config{
+		ConsulConfig: &monitor.ConsulConfig{},
+	}
 
 	flag.StringVar(&fileConfigPath, "config", "", "")
 	flag.StringVar(&cliConfig.Endpoint, "endpoint", "", "")
@@ -58,22 +64,11 @@ func readConfig(args []string) (*monitor.Config, error) {
 		if err != nil {
 			return nil, err
 		}
+
+		config.Merge(fileConfig)
 	}
 
-	// merge everything
-
-	config := monitor.DefaultConfig()
-
-	err := mergo.MergeWithOverwrite(config, *fileConfig)
-	if err != nil {
-		return nil, err
-	}
-
-	err = mergo.MergeWithOverwrite(config, *cliConfig)
-	if err != nil {
-		return nil, err
-	}
-
+	config.Merge(cliConfig)
 	return config, nil
 }
 
@@ -85,6 +80,13 @@ func run(args []string) error {
 	if err != nil {
 		return fmt.Errorf("Failed to read config: %v", err)
 	}
+
+	prettyConfig, err := json.MarshalIndent(config, "", "\t")
+	if err != nil {
+		return fmt.Errorf("Failed to prettify config: %v", err)
+	}
+
+	fmt.Println(string(prettyConfig))
 
 	// Handle interupts.
 	c := make(chan os.Signal, 1)

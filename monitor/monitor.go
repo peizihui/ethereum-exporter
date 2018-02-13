@@ -162,10 +162,10 @@ func (m *Monitor) setupConsulImpl() error {
 
 	service := &consulapi.AgentServiceRegistration{
 		ID:      serviceID,
-		Name:    m.config.ConsulServiceName,
+		Name:    m.config.ConsulConfig.ServiceName,
 		Port:    m.config.BindPort,
 		Address: address,
-		Tags:    []string{"pool", "parity", m.chain},
+		Tags:    m.config.ConsulConfig.Tags,
 		Check: &consulapi.AgentServiceCheck{
 			HTTP:     fmt.Sprintf("%s/synced", address),
 			Interval: "1s",
@@ -173,7 +173,10 @@ func (m *Monitor) setupConsulImpl() error {
 		},
 	}
 
-	client, err := consulapi.NewClient(consulapi.DefaultConfig())
+	consulConfig := consulapi.DefaultConfig()
+	consulConfig.Address = m.config.ConsulConfig.Address
+
+	client, err := consulapi.NewClient(consulConfig)
 	if err != nil {
 		return err
 	}
