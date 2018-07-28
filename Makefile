@@ -1,11 +1,14 @@
 
-DOCKER_IMAGE_NAME ?= ethereum-exporter
-
 build:
-	echo ">> building binaries..."
+	echo ">> build binaries..."
 	sh -c ./scripts/build.sh
 
 docker:
-	echo ">> building docker image..."
+	echo ">> build docker image..."
+	docker build -t melonproject/ethereum-exporter .
+
+publish:
+	echo ">> publish docker image..."
+	docker push melonproject/ethereum-exporter:latest
 
 .PHONY: build docker

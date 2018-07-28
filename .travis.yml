@@ -1,0 +1,10 @@
+language: c
+
+services:
+  - docker
+
+script:
+  - make build
+  - make docker
+  - docker login -u $DOCKER_USERNAME -p $DOCKER_PASSWORD
+  - make publish
